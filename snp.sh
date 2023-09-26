@@ -140,6 +140,10 @@ cleanup() {
         #cat ${LAUNCH_WORKING_DIR}/*.log 2>/dev/null
         cat ${LAUNCH_WORKING_DIR}/qemu-trace.log 2>/dev/null
         ;;
+      
+      build_guest)
+        cat ${LAUNCH_WORKING_DIR}/qemu-trace.log 2>/dev/null
+        ;;
 
       attest-guest)
         cat ${ATTESTATION_WORKING_DIR}/*.log 2>/dev/null
@@ -590,6 +594,48 @@ build_and_install_amdsev() {
   save_binary_paths
 }
 
+build_guest_amdsev() {
+  local amdsev_branch="${1:-${AMDSEV_DEFAULT_BRANCH}}"
+
+  # Create directory
+  mkdir -p "${SETUP_WORKING_DIR}"
+  
+  # Clone and switch branch
+  pushd "${SETUP_WORKING_DIR}" >/dev/null
+  if [ ! -d "AMDSEV" ]; then
+    git clone -b "${amdsev_branch}" "${AMDSEV_URL}" "AMDSEV"
+    git -C "AMDSEV" remote add current "${AMDSEV_URL}"
+  fi
+
+  # Fetch, checkout, update
+  cd "AMDSEV"
+  git remote set-url current "${AMDSEV_URL}"
+  git fetch current "${amdsev_branch}"
+  git checkout "current/${amdsev_branch}"
+
+  # Build and copy files
+  ./build.sh qemu
+  ./build.sh ovmf
+  ./build.sh --package kernel guest
+  # ./build.sh --package
+  sudo cp kvm.conf /etc/modprobe.d/
+  
+  # Install
+  cd $(ls -d snp-release-* | head -1)
+  sudo ./install.sh
+  
+  popd >/dev/null
+
+  # dracut initrd build is not working currently
+  # Devices are failing to mount using the dracut built initrd
+  # This step replaced by steps to install kernel and initrd in the guest during launch
+  # Build the guest binary from the guest kernel
+  #build_guest_initrd
+
+  # Save binary paths in source file
+  save_binary_paths
+}
+
 setup_and_launch_guest() {
   # Return error if user specified file that doesn't exist
   if [ ! -f "${IMAGE}" ] && ${SKIP_IMAGE_CREATE}; then
@@ -703,31 +749,6 @@ setup_guest() {
   fi
 
   local guest_kernel_installed_file="${LAUNCH_WORKING_DIR}/guest_kernel_already_installed"
-  # echo "GUEST_SIZE_GB is set to: ${GUEST_SIZE_GB}"
-  if [ ! -f "${guest_kernel_installed_file}" ]; then
-    # Launch qemu cmdline
-    # echo "QEMU_CMDLINE_FILE: ${QEMU_CMDLINE_FILE}"
-    "${QEMU_CMDLINE_FILE}"
-    # echo "QEMU_CMDLINE_FILE: ${QEMU_CMDLINE_FILE}"
-
-    # Install the guest kernel, retrieve the initrd and then reboot
-    local guest_kernel=$(echo $(realpath "${SETUP_WORKING_DIR}/AMDSEV/linux/guest/debian/linux-image/boot/vmlinuz*"))
-    local guest_kernel_version=$(echo "${guest_kernel}" | sed "s|.*/boot/vmlinuz-\(.*\)|\1|g")
-    local guest_kernel_deb=$(echo "$(realpath ${SETUP_WORKING_DIR}/AMDSEV/linux/linux-image*snp-guest*.deb)" | grep -v dbg)
-    local guest_initrd_basename="initrd.img-${guest_kernel_version}"
-    wait_and_retry_command "scp_guest_command ${guest_kernel_deb} ${GUEST_USER}@localhost:/home/${GUEST_USER}"
-    ssh_guest_command "sudo dpkg -i /home/${GUEST_USER}/$(basename ${guest_kernel_deb})"
-    scp_guest_command "${GUEST_USER}@localhost:/boot/${guest_initrd_basename}" "${SETUP_WORKING_DIR}"
-    ssh_guest_command "sudo shutdown now" || true
-    echo "true" > "${guest_kernel_installed_file}"
-
-    # A few seconds for shutdown to complete
-    sleep 3
-
-    # Call the launch-guest again now that the image is prepped
-    setup_guest
-    return 0
-  fi
 
   # Add sev-guest module to host generated initrd
   # To be used as the guest initrd
@@ -1114,9 +1135,9 @@ main() {
       install_dependencies
 
       if $UPM; then
-        build_and_install_amdsev "${AMDSEV_DEFAULT_BRANCH}"
+        build_guest_amdsev "${AMDSEV_DEFAULT_BRANCH}"
       else
-        build_and_install_amdsev "${AMDSEV_NON_UPM_BRANCH}"
+        build_guest_amdsev "${AMDSEV_NON_UPM_BRANCH}"
       fi
       if [ ! -d "${SETUP_WORKING_DIR}" ]; then
         echo -e "Setup directory does not exist, please run 'setup-host' prior to 'launch-guest'"
